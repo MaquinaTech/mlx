@@ -238,6 +238,7 @@ class MLX_API Device {
   std::shared_mutex library_mtx_;
   std::unordered_map<std::string, NS::SharedPtr<MTL::Library>> library_map_;
   NS::SharedPtr<MTL::Library> default_library_;
+  MTL::Library* runtime_default_library_(const std::string& base_name);
   std::unordered_map<
       MTL::Library*,
       std::unordered_map<std::string, NS::SharedPtr<MTL::ComputePipelineState>>>

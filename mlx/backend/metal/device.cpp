@@ -30,6 +30,11 @@ struct hash<NS::SharedPtr<T>> {
 
 namespace mlx::core::metal {
 
+// Generated (runtime_default_kernels.cpp): Metal sources of the non-JIT kernel files, compiled lazily with the
+// Metal runtime compiler, so that no Metal toolchain (and no mlx.metallib) is needed at build or run time.
+const char* runtime_default_group_source(const char* group);
+const char* runtime_default_kernel_group(const std::string& kernel);
+
 namespace {
 
 constexpr const char* default_mtllib_path = METAL_PATH;
@@ -585,7 +590,11 @@ MTL::ComputeCommandEncoder* CommandEncoder::get_command_encoder() {
 
 Device::Device() : device_(load_device()), residency_sets_(device_.get()) {
   auto pool = new_scoped_memory_pool();
-  default_library_ = NS::TransferPtr(load_default_library(device_.get()));
+  // Embedded runtime sources are authoritative: no metallib search at all, so a stray or
+  // version-mismatched mlx.metallib can never replace the kernels built from the pinned sources.
+  if (runtime_default_group_source("rms_norm") == nullptr) {
+    default_library_ = NS::TransferPtr(load_default_library(device_.get()));
+  }
   arch_ = env::metal_gpu_arch();
   if (arch_.empty()) {
     arch_ = std::string(device_->architecture()->name()->utf8String());
@@ -894,6 +903,28 @@ MTL::ComputePipelineState* Device::get_kernel(
   return get_kernel_(base_name, mtl_lib, kname, func_consts, linked_functions);
 }
 
+// Embedded-sources route: map the kernel name to its group (exact table, generated from
+// MTLLibrary.functionNames), compile that group once, lazily.
+MTL::Library* Device::runtime_default_library_(const std::string& base_name) {
+  const char* g = runtime_default_kernel_group(base_name);
+  if (g == nullptr) {
+    throw std::runtime_error(
+        "[metal::Device] kernel not found in embedded runtime sources: " + base_name);
+  }
+  std::string lname = std::string("runtime:") + g;
+  {
+    std::shared_lock rlock(library_mtx_);
+    auto it = library_map_.find(lname);
+    if (it != library_map_.end()) return it->second.get();
+  }
+  std::unique_lock wlock(library_mtx_);
+  auto it = library_map_.find(lname);
+  if (it != library_map_.end()) return it->second.get();
+  auto built = build_library_(runtime_default_group_source(g), {});
+  library_map_.insert({lname, built});
+  return built.get();
+}
+
 MTL::ComputePipelineState* Device::get_kernel(
     const std::string& base_name,
     const std::string& hash_name /*  = "" */,
@@ -901,7 +932,8 @@ MTL::ComputePipelineState* Device::get_kernel(
     const std::vector<MTL::Function*>& linked_functions /*  = {} */) {
   return get_kernel(
       base_name,
-      default_library_.get(),
+      default_library_ ? default_library_.get()
+                       : runtime_default_library_(base_name),
       hash_name,
       func_consts,
       linked_functions);
