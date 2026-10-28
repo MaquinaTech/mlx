@@ -30,6 +30,30 @@ struct hash<NS::SharedPtr<T>> {
 
 namespace mlx::core::metal {
 
+#ifdef MLX_METAL_RUNTIME_KERNELS
+// Provided by the build (a generated source file) in place of the default
+// metallib: the name of the library that holds each of its kernels, and the
+// Metal source of each library.
+const std::string* runtime_default_library_name(const std::string& kernel);
+const char* runtime_default_library_source(const std::string& name);
+
+namespace {
+
+// The library that holds `base_name`, compiled from its embedded source the
+// first time one of its kernels is requested.
+MTL::Library* runtime_default_library(Device& d, const std::string& base_name) {
+  auto name = runtime_default_library_name(base_name);
+  if (!name) {
+    throw std::runtime_error(
+        fmt::format("[metal::Device] No embedded source for {}.", base_name));
+  }
+  return d.get_library(
+      *name, [name]() { return runtime_default_library_source(*name); });
+}
+
+} // namespace
+#endif
+
 namespace {
 
 constexpr const char* default_mtllib_path = METAL_PATH;
@@ -611,7 +635,14 @@ MTL::ComputeCommandEncoder* CommandEncoder::get_command_encoder() {
 
 Device::Device() : device_(load_device()), residency_sets_(device_.get()) {
   auto pool = new_scoped_memory_pool();
+#ifdef MLX_METAL_RUNTIME_KERNELS
+  // No default metallib, unless one is given with set_metallib_path().
+  if (!get_metallib_path().empty()) {
+    default_library_ = NS::TransferPtr(load_default_library(device_.get()));
+  }
+#else
   default_library_ = NS::TransferPtr(load_default_library(device_.get()));
+#endif
   arch_ = env::metal_gpu_arch();
   if (arch_.empty()) {
     arch_ = std::string(device_->architecture()->name()->utf8String());
@@ -925,12 +956,14 @@ MTL::ComputePipelineState* Device::get_kernel(
     const std::string& hash_name /*  = "" */,
     const MTLFCList& func_consts /*  = {} */,
     const std::vector<MTL::Function*>& linked_functions /*  = {} */) {
+  auto mtl_lib = default_library_.get();
+#ifdef MLX_METAL_RUNTIME_KERNELS
+  if (!mtl_lib) {
+    mtl_lib = runtime_default_library(*this, base_name);
+  }
+#endif
   return get_kernel(
-      base_name,
-      default_library_.get(),
-      hash_name,
-      func_consts,
-      linked_functions);
+      base_name, mtl_lib, hash_name, func_consts, linked_functions);
 }
 
 Device& device(mlx::core::Device) {
